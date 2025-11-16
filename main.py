@@ -1,109 +1,140 @@
+# ===============================
+# 1. IMPORTS
+# ===============================
 import os
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
 # ===============================
-# 1. LOAD CSV FILES
+# 2. LOAD CSV FILES
 # ===============================
-folder_path = "data"  # your folder with CSVs
-csv_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".csv")]
+folder_path = "data"
+csv_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.csv')]
 
-# Load last 5 seasons
-dfs = [pd.read_csv(f) for f in sorted(csv_files)[-5:]]
-all_matches = pd.concat(dfs, ignore_index=True)
-
-# Keep only team columns
-if 'Team 1' not in all_matches.columns or 'Team 2' not in all_matches.columns:
-    raise ValueError("CSV files must contain 'Team 1' and 'Team 2' columns")
-
-all_matches = all_matches[['Team 1', 'Team 2']]
+all_matches = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+print(f"Loaded {len(csv_files)} CSV files, total matches: {len(all_matches)}")
 
 # ===============================
-# 2. Determine historical results
+# 3. DEFINE TOP 20 TEAMS
 # ===============================
-# If your CSVs have 'Result' column, use it; otherwise fabricate historical results randomly for percentages
-if 'Result' not in all_matches.columns:
-    np.random.seed(42)
-    results = np.random.choice(['H', 'D', 'A'], size=len(all_matches), p=[0.45, 0.25, 0.30])
-    all_matches['Result'] = results
-
-# ===============================
-# 3. Select Top 20 Teams
-# ===============================
-latest_season = dfs[-1]
-top_20_teams = latest_season['Team 1'].unique().tolist()
-print("Top 20 teams:", top_20_teams)
-
-all_matches = all_matches[
-    all_matches['Team 1'].isin(top_20_teams) & all_matches['Team 2'].isin(top_20_teams)
+top_20_teams = [
+    'Arsenal', 'Crystal Palace', 'West Ham', 'Tottenham', 'Newcastle',
+    'Man United', 'Man City', 'Everton', 'Liverpool', 'Chelsea',
+    'Brighton', 'Wolves', 'Southampton', 'Leicester', 'Aston Villa',
+    'Burnley', 'Bournemouth', 'Fulham', 'Leeds', 'Brentford'
 ]
 
-# ===============================
-# 4. Compute Historical Probabilities
-# ===============================
-team_stats = {}
-for team in top_20_teams:
-    team_matches = all_matches[(all_matches['Team 1'] == team) | (all_matches['Team 2'] == team)]
-    total = len(team_matches)
-    wins = ((team_matches['Team 1'] == team) & (team_matches['Result'] == 'H')).sum()
-    wins += ((team_matches['Team 2'] == team) & (team_matches['Result'] == 'A')).sum()
-    draws = (team_matches['Result'] == 'D').sum() / 2  # split between teams
-    losses = total - wins - draws
-    team_stats[team] = {
-        'win_prob': wins / total,
-        'draw_prob': draws / total,
-        'loss_prob': losses / total
-    }
+# Filter matches: only keep those between top 20 teams
+all_matches = all_matches[
+    all_matches['Team 1'].isin(top_20_teams) &
+    all_matches['Team 2'].isin(top_20_teams)
+    ].copy()
+
+# Split 'FT' into Home and Away goals if exists
+if 'FT' in all_matches.columns:
+    goals = all_matches['FT'].str.split('-', expand=True)
+    all_matches['FT'] = goals[0].astype(int)
+    all_matches['FA'] = goals[1].astype(int)
+else:
+    all_matches['FT'] = 0
+    all_matches['FA'] = 0
+
 
 # ===============================
-# 5. Generate Fixtures
+# 4. DETERMINE MATCH RESULTS
 # ===============================
-fixtures = [(home, away) for home in top_20_teams for away in top_20_teams if home != away]
+def get_result(row):
+    if row['FT'] > row['FA']:
+        return 'H'
+    elif row['FT'] < row['FA']:
+        return 'A'
+    else:
+        return 'D'
+
+
+all_matches['Result'] = all_matches.apply(get_result, axis=1)
 
 # ===============================
-# 6. Simulate Season
+# 5. PREPARE DATA FOR ML
 # ===============================
-points_table = {team: 0 for team in top_20_teams}
-w_table = {team: 0 for team in top_20_teams}
-d_table = {team: 0 for team in top_20_teams}
-l_table = {team: 0 for team in top_20_teams}
+le_home = LabelEncoder()
+le_away = LabelEncoder()
+le_home.fit(top_20_teams)
+le_away.fit(top_20_teams)
 
-np.random.seed(42)
+all_matches['Team 1'] = le_home.transform(all_matches['Team 1'])
+all_matches['Team 2'] = le_away.transform(all_matches['Team 2'])
+
+X = all_matches[['Team 1', 'Team 2']]
+y = all_matches['Result']
+
+# Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# ===============================
+# 6. TRAIN RANDOM FOREST MODEL
+# ===============================
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+accuracy = (model.predict(X_test) == y_test).mean()
+print(f"Model trained. Test accuracy: {accuracy * 100:.2f}%")
+
+# ===============================
+# 7. GENERATE FIXTURES
+# ===============================
+team_ids = le_home.transform(top_20_teams)
+fixtures = []
+
+# Each team plays each other twice (home and away)
+for home in team_ids:
+    for away in team_ids:
+        if home != away:
+            fixtures.append((home, away))
+
+# ===============================
+# 8. SIMULATE SEASON
+# ===============================
+np.random.seed(None)  # Truly random each run
+
+points_table = {team: {'W': 0, 'D': 0, 'L': 0, 'Points': 0} for team in team_ids}
 
 for home, away in fixtures:
-    home_probs = team_stats[home]
-    away_probs = team_stats[away]
+    input_row = pd.DataFrame({'Team 1': [home], 'Team 2': [away]})
 
-    win_prob = (home_probs['win_prob'] + away_probs['loss_prob']) / 2
-    draw_prob = (home_probs['draw_prob'] + away_probs['draw_prob']) / 2
-    loss_prob = (home_probs['loss_prob'] + away_probs['win_prob']) / 2
+    # Predict result probabilistically using model
+    pred = model.predict(input_row)[0]
 
-    result = np.random.choice(['H', 'D', 'A'], p=[win_prob, draw_prob, loss_prob])
-
-    if result == 'H':
-        points_table[home] += 3
-        w_table[home] += 1
-        l_table[away] += 1
-    elif result == 'A':
-        points_table[away] += 3
-        w_table[away] += 1
-        l_table[home] += 1
-    else:
-        points_table[home] += 1
-        points_table[away] += 1
-        d_table[home] += 1
-        d_table[away] += 1
+    if pred == 'H':
+        points_table[home]['W'] += 1
+        points_table[home]['Points'] += 3
+        points_table[away]['L'] += 1
+    elif pred == 'A':
+        points_table[away]['W'] += 1
+        points_table[away]['Points'] += 3
+        points_table[home]['L'] += 1
+    else:  # Draw
+        points_table[home]['D'] += 1
+        points_table[home]['Points'] += 1
+        points_table[away]['D'] += 1
+        points_table[away]['Points'] += 1
 
 # ===============================
-# 7. Build League Table
+# 9. BUILD FINAL LEAGUE TABLE
 # ===============================
-league_table = pd.DataFrame({
-    'Team': top_20_teams,
-    'W': [w_table[t] for t in top_20_teams],
-    'D': [d_table[t] for t in top_20_teams],
-    'L': [l_table[t] for t in top_20_teams],
-    'Points': [points_table[t] for t in top_20_teams]
-})
+league_table = pd.DataFrame([
+    {
+        'Team': le_home.inverse_transform([team])[0],
+        'W': stats['W'],
+        'D': stats['D'],
+        'L': stats['L'],
+        'Points': stats['Points']
+    }
+    for team, stats in points_table.items()
+])
 
 league_table = league_table.sort_values('Points', ascending=False).reset_index(drop=True)
 league_table['Position'] = league_table.index + 1
